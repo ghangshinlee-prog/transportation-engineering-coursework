@@ -1,0 +1,10 @@
+data/
+*.csv
+*.tntp
+*.xlsx
+.DS_Store
+._*
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+.Rhistory

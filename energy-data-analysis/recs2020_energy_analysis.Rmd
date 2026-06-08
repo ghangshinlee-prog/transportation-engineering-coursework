@@ -1,0 +1,1370 @@
+---
+title: "In-Class Energy Data Analysis"
+output:
+  pdf_document: default
+  html_document: default
+date: "2024-04-10"
+author: Ghangshin Lee
+---
+
+# Introduction
+Every four years, the U.S. Energy Information Administration (EIA) administers the Residential Energy Consumption Survey (RECS) to a "nationally representative sample of housing units" across the United States to "collect energy characteristics data on the housing unit, usage patterns, and household demographics" [(EIA, 2024)](https://www.eia.gov/consumption/residential/about.php).
+
+This project focuses on 2020 RECS survey data which is the 15th iteration of the RECS program. First conducted in 1978, this national sample survey collects energy-related data for housing units *occupied as a primary residence*. As a result, RECS is an independent, cross-sectional study and does not sample the same housing units across time. 2020 data were collected from 18,496 households and used only self-reported web and mailed questionnaires.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#load popular package (requires others)
+library(tidyverse)
+library(stringr)
+```
+
+
+#Exploratory Data Analysis (EDA)
+In the EDA phase, we will perform initial investigations on the dataset to check the following:
+* data dimensionality (or shape) along with observing first few observations of the dataset
+* data types (whether categorical or numerical)
+* generate summary statistics
+* missing values
+* explore our target variable 'KWH' (kilowatt-hour) and its possible predictors from the dataset
+* detect outliers and anomalies
+* explore additional predictor variables
+
+##Data Dimensionality
+
+```{r read in dataset, echo=FALSE}
+#Read in dataset
+df = read.csv("recs2020_public_v7.csv",header=TRUE)
+df2 = df #backup copy
+
+#Read in codebook
+codebook = readxl::read_excel("RECS 2020 Codebook for Public File - v7.xlsx",
+                              skip=1)
+
+#confirm dimensions of the dataset
+dim(df)
+cat("Number of observations:", dim(df)[1], "\n")
+cat("Number of features:", dim(df)[2], "\n")
+```
+
+As can be seen above, RECS 2020 dataset consists of 18,496 household observations and 799 features. Let's explore how many of these features are categorical versus numerical.
+
+##Data Types
+
+```{r data types, echo=FALSE}
+#determine data types of columns
+column_types <- sapply(df, class)
+
+#count categorical and numerical columns
+num_categorical <- sum(column_types == "factor" | column_types == "character")
+num_numerical <- sum(column_types == "numeric")
+
+cat("Number of categorical columns:", num_categorical, "\n")
+cat("Number of numerical columns:", num_numerical, "\n")
+```
+
+We can also get the summary statistics of each feature (column) in the dataset. Suppose we are interested in only a subset of features:
+
+```{r data types - describe}
+#get summary statistics for 5 features (you can select which ones to show!)
+summary(df[10:14])
+#get description of these features
+codebook[10:14,c(1,3)]
+
+#alternative packages
+#install.packages("Hmisc")
+#install.packages("psych")
+library(Hmisc)
+library(psych)
+
+Hmisc::describe(df[10:15])
+psych::describe(df[10:15])
+
+```
+When we view the data this way we see that some numerical data have a min of -2 and a max of 1, reflecting categorical data coded as numerical.
+
+##Check for Missing/Odd Data
+```{r missing data check}
+#check for missing data across entire df
+any(is.na(df))
+na_count <- sum(as.numeric((is.na(df))))
+cat("Number of NA values across the df:", na_count, "\n")
+
+#check for any -2 = Not applicable responses
+notapplicable_count <- sum(df==-2, na.rm = TRUE)
+cat("Number of -2 values across the df:", notapplicable_count, "\n")
+
+#check for any -4 = Don't know responses
+idk_count <- sum(df==-4, na.rm = TRUE)
+cat("Number of -4 values across the df:", idk_count, "\n")
+
+# Calculate the proportion of observations with value -2 for each variable
+library(dplyr)
+prop_minus2 <- df %>%
+    summarise(across(everything(), ~sum(. == -2, na.rm = TRUE) / n())) %>%
+  unlist(use.names = FALSE)
+prop_minus2 <- as.data.frame(cbind(colnames(df),prop_minus2))
+prop_minu2_95 <- prop_minus2[prop_minus2$prop_minus2 > 0.95,]
+count(prop_minu2_95) 
+#number of variables that would not be useful in the model (many Not Applicables)
+print(prop_minu2_95)
+
+```
+
+## Explore Total Electricity Use (KWH)
+
+```{r KWH describe}
+#explore target variable kWh
+describe(df$KWH)
+```
+A few key insights are:
+- Variable KWH is numeric
+- The mean value of KWH in 2020 is 10,849 kWh with a standard deviation of 7,112 kWh
+- The min value of KWH is 42 kWh (for an entire year!) and the max is 184,102 kWh (for an entire year!)
+
+Let's go ahead and plot the distribution of this data:
+
+```{r KWH plot, echo=FALSE}
+#install.packages("ggplot2")
+library(ggplot2)
+
+ggplot(df, aes(x = KWH)) +
+  geom_histogram(bins = 100, fill = "skyblue", color = "black")+
+  labs(title = "KWH Distribution",
+       x = "KWH",
+       y = "Density")+
+  xlim(0,100000) #test if this limit is sufficient
+```
+
+It can be seen from the graph above that the distribution of KWH is positively skewed. This means that the outliers of the distribution are further towards the right. Let's create box plot (i.e. box and whisker diagram) for KWH to see the range of values in a more intuitive way.
+
+```{r KWH boxplot, echo=FALSE}
+library(ggplot2)
+
+ggplot(df, aes(x = KWH)) +
+  geom_boxplot(fill="skyblue")+
+  labs(title = "KWH Boxplot",
+       x = "KWH")+
+  scale_x_continuous(breaks=seq(0,180000,25000))+
+  scale_y_continuous(labels = NULL)
+```
+
+We can clearly see that all values greater than 75,000 kWh are clearly outliers. To tackle the issue of skewed data we can apply a log transformation.
+
+```{r log-kWH plot, echo=FALSE}
+library(ggplot2)
+df$logKWH <- log(df$KWH)
+ggplot(df, aes(x = logKWH)) +
+  geom_histogram(bins = 100, fill = "skyblue", color = "black")+ 
+  #change the color here
+  labs(title = "log(KWH) Distribution",
+       x = "log(KWH)",
+       y = "Density")
+
+#a full list of discrete color palettes for common journals are here:
+#<https://cran.r-project.org/web/packages/ggsci/vignettes/ggsci.html>
+```
+
+We can observe from the plot above that the log transformation has brought the data closer to a normal/bell shape curve. Thus, any statistical analysis should be run on the log transformation of KWH.
+
+Let's look at the correlations between total annual electricity use and features available in the dataset.
+
+```{r log-kWH features sort, echo=FALSE}
+#calculate correlations
+#filter out non-numeric data & NWEIGHTS variables
+library(dplyr)
+filtered_df <- df2[,c(1:617,646:799)]
+nweights_btuel_dole_column <- c(grep("NWEIGHT", 
+                                     colnames(filtered_df), value = TRUE),
+                                grep("BTUEL", 
+                                     colnames(filtered_df), value = TRUE),
+                                grep("DOLE", 
+                                     colnames(filtered_df), value = TRUE)
+)
+filtered_df <- filtered_df[, !colnames(filtered_df) %in% 
+                             nweights_btuel_dole_column]
+numeric <- sapply(filtered_df, is.numeric)
+filtered_df <- filtered_df[,numeric]
+correlations <- as.matrix(cor(filtered_df$KWH,
+                              filtered_df[,!colnames(filtered_df) %in% c("KWH")]))
+
+#best 30
+best_predictors <- order(correlations, decreasing = TRUE)[1:30]
+
+#keep top 30
+top30_features <- correlations[,best_predictors]
+print(names(top30_features))
+print(top30_features)
+filtered_df_top30 <- filtered_df[, colnames(filtered_df) %in% 
+                                   names(top30_features)]
+filtered_df_top30$KWH = filtered_df$KWH
+
+library(corrplot)
+# Plot the correlation matrix corrplot
+filtered_df_top30 <- filtered_df_top30[, c("KWH", 
+                                           setdiff(names(filtered_df_top30), "KWH"))]
+correlations <- cor(filtered_df_top30)
+corrplot(correlations, method = 'square',
+         type = 'lower',diag = FALSE) # colorful number
+
+#more information on corrplot is found by typing ? 
+#in front of the package name (down in the console)
+#?corrplot 
+```
+
+Plot shows that KWH is correlated with TOTAL electricity costs, BTUs, square foot variables (no surprise there). It is also correlated with other factors like #of bedrooms, total rooms, windows, swim pool, and other appliances!
+
+Let's see a scatter plot of the independent vars (since BTUs are linear combinations of KWHs).
+
+```{r scatter plots, echo=FALSE}
+#calculate correlations
+library(ggplot2)
+ggplot(df, aes(y = KWH, x = BEDROOMS)) +
+  geom_point() +
+  labs(y = "Annual Elecricity Use (in kWh)", x = "# of Bedrooms",
+       title = "Scatterplot between KWH and Total Bedroom Count")
+ggplot(df, aes(y = KWH, x = TOTROOMS)) +
+  geom_point() +
+  labs(y = "Annual Elecricity Use (in kWh)", x = "# of Rooms",
+       title = "Scatterplot between KWH and Total Room Count")
+ggplot(df, aes(y = KWH, x = SQFTEST)) +
+  geom_point() +
+  labs(y = "Annual Elecricity Use (in kWh)", x = "Square Footage",
+       title = "Scatterplot between KWH and Respondent-Reported Square Footage")
+ggplot(df, aes(y = KWH, x = TOTHSQFT)) +
+  geom_point() +
+  labs(y = "Annual Elecricity Use (in kWh)", x = "Square Footage Heated",
+       title = "Scatterplot between KWH and Square Footage\n Heated by Space Heating Equipment")
+ggplot(df, aes(y = KWH, x = TOTCSQFT)) +
+  geom_point() +
+  labs(y = "Annual Elecricity Use (in kWh)", x = "Square Footage Cooled",
+       title = "Scatterplot between KWH and Square Footage Cooled by AC")
+ggplot(df, aes(y = KWH, x = NHSLDMEM)) +
+  geom_point() +
+  labs(y = "Annual Elecricity Use (in kWh)", x = "# of Household Members",
+       title = "Scatterplot between KWH and Household Size")
+```
+
+How would we report this is a more meaningful manner? Well, we could create an average daily electricity use plot.
+
+```{r avg daily KWH}
+library(ggplot2)
+ggplot(df, aes(y = KWH/365, x = TOTCSQFT)) +
+  geom_point() +
+  scale_y_continuous(limits = c(0, 200))+
+  scale_x_continuous(limits = c(0, 10000),
+                     labels = function(x) paste0(x/1000, "K")) +
+  # Custom x-axis labels in 1,000s
+  labs(y = "Average Daily Elecricity Use (in kWh)", 
+       x = "Square Footage Cooled (in units of 1,000)",
+       title = "Scatterplot between KWH and Square Footage Cooled by AC")
+```
+
+We might suspect that high & low temps are going to increase cooling & heating electricity use, assuming the household has AC & electric heating, respectively. We can plot this in a histogram to explore the distribution of these variables. 
+
+```{r heat cool days, echo=FALSE}
+library(cowplot)
+#HDD65 = total sum of the number of degrees above 65 for all days above 65
+plot1 <- ggplot(df, aes(x = TOTCSQFT)) +
+  geom_histogram(bins = 100, fill = "skyblue", color = "black")+
+  labs(x = "Total Sq Ft",
+       y = "Density")
+plot2 <- ggplot(df, aes(x = HDD65)) +
+  geom_histogram(bins = 100, fill = "skyblue", color = "black")+
+  labs(x = "Heating Degree Days, Base 65",
+       y = "Density")
+plot3 <- ggplot(df, aes(x = HDD30YR_PUB)) +
+  geom_histogram(bins = 100, fill = "skyblue", color = "black")+
+  labs(x = "Heating Degree Days, Base 65, 30-Yr Avg",
+       y = "Density")
+plot4 <- ggplot(df, aes(x = CDD65)) +
+  geom_histogram(bins = 100, fill = "skyblue", color = "black")+
+  labs(x = "Cooling Degree Days, Base 65",
+       y = "Density")
+plot5 <- ggplot(df, aes(x = CDD30YR_PUB)) +
+  geom_histogram(bins = 100, fill = "skyblue", color = "black")+
+  labs(x = "Cooling Degree Days, Base 65, 30-Yr Avg",
+       y = "Density")
+
+# Arrange plots side by side
+plot_grid(plot1, plot2, plot3, plot4, plot5, ncol = 2)
+```
+
+### Explore Additional Predictor Variables
+```{r urban area type, echo=FALSE}
+library(ggsci) #scientific journal colors
+library(ggplot2)
+ggplot(df, aes(y = KWH, x = as.factor(UATYP10),
+               fill = as.factor(UATYP10))) +
+  geom_boxplot()+
+  labs(title = "KWH Boxplot by Urban Area Type",
+       y = "KWH", x = "Urban Area Type")+
+  scale_fill_npg(name="",labels=c("Urban Cluster",
+                                      "Rural Area",
+                                      "Urban Area"))+
+  theme(legend.position = "bottom")+
+  ylim(0,65000)
+```
+
+Please create figures for housing type, year built, and total number of rooms.Do you observe any relationships between type of housing and KWH used? What about what sorts of homes do Americans live in? Are they mostly detached homes? When were they built? Are newer homes more energy efficient? If not, what could be the reason?
+
+```{r housing type, echo=FALSE}
+library(ggsci)
+library(ggplot2)
+#What is the relation between these variables and total KWH used in a year?
+
+ggplot(df, aes(x = as.factor(TYPEHUQ), fill = as.factor(TYPEHUQ)))+
+  geom_bar()+
+  labs(x = "Housing Type", y = "Count",
+       title = "Count Plot of Housing Type Data")+
+  scale_fill_npg(name="Type")
+
+#How do we clean this up?
+#What do the numbers mean? How do we look up this information?
+wrapped_string <- str_wrap(as.character(codebook[codebook$Variable=="TYPEHUQ", 4]), width = 60)
+cat(wrapped_string)
+
+ggplot(df, aes(x = as.factor(TYPEHUQ), fill = as.factor(TYPEHUQ)))+
+  geom_bar()+
+  labs(x = "Housing Type", y = "Count",
+       title = "Count Plot of Housing Type Data")+
+  scale_fill_npg(name="Type",
+                 labels=c("Mobile Home",
+                          "Detached Home",
+                          "Attached Home",
+                          "Apartment 2-4 units",
+                          "Apartmment 5+ units"))+
+  theme(legend.position = "bottom",
+        axis.text.x = element_blank())
+
+#plot relationship between housing type & kWH consumption
+ggplot(df, aes(y = KWH, x = as.factor(TYPEHUQ),
+               fill = as.factor(TYPEHUQ))) +
+  geom_boxplot()+
+  labs(title = "KWH Boxplot by Housing Type",
+       y = "KWH", x = "Housing Type")+
+  scale_fill_npg(name="",labels=c("Mobile Home",
+                                  "Detached Home",
+                                  "Attached Home",
+                                  "Apartment 2-4 units",
+                                  "Apartmment 5+ units"))+
+  theme(legend.position = "bottom",
+        axis.text.x = element_blank())+
+  ylim(0,65000)
+
+#median KWH
+median_kwh <- aggregate(KWH ~ TYPEHUQ, df, median)
+ggplot(median_kwh, aes(x = as.factor(TYPEHUQ), y = KWH, fill = as.factor(TYPEHUQ))) +
+  geom_bar(stat = "identity") +
+  labs(x = "Housing Type", y = "Median KWH",
+       title = "Median KWH of Housing Types") +
+  scale_fill_npg(name = "Type",
+                 labels = c("Mobile Home",
+                            "Detached Home",
+                            "Attached Home",
+                            "Apartment 2-4 units",
+                            "Apartment 5+ units")) +
+  theme(legend.position = "bottom", axis.text.x = element_blank())+
+  ylim(0,12000)
+```
+
+```{r year built, echo=FALSE}
+#What is the relation between year built and total KWH used in a year?
+library(ggsci)
+library(ggplot2)
+
+wrapped_string <- str_wrap(as.character(codebook[codebook$Variable=="YEARMADERANGE", 4]), width = 60)
+cat(wrapped_string)
+
+
+ggplot(df, aes(x = as.factor(YEARMADERANGE), fill = as.factor(YEARMADERANGE)))+
+  geom_bar()+
+  labs(x = "Year Built", y = "Count",
+       title = "Count Plot of Housing Build Year Data")+
+  scale_fill_npg(name="Date Range",
+                 labels=c("Before 1950",
+                          "1950 to 1959",
+                          "1960 to 1969",
+                          "1970 to 1979",
+                          "1980 to 1989",
+                          "1990 to 1999",
+                          "2000 to 2009",
+                          "2010 to 2015",
+                          "2016 to 2020"))+
+  theme(axis.text.x = element_blank())
+
+ggplot(df, aes(y = KWH, x = as.factor(YEARMADERANGE),
+               fill = as.factor(YEARMADERANGE))) +
+  geom_boxplot()+
+  labs(title = "KWH Boxplot by Year Built",
+       y = "KWH", x = "Year Built")+
+  scale_fill_npg(name="Date Range",
+                 labels=c("Before 1950",
+                          "1950 to 1959",
+                          "1960 to 1969",
+                          "1970 to 1979",
+                          "1980 to 1989",
+                          "1990 to 1999",
+                          "2000 to 2009",
+                          "2010 to 2015",
+                          "2016 to 2020"))+
+  theme(axis.text.x = element_blank())+
+  ylim(0,80000)
+
+median_kwh_built <- aggregate(KWH ~ YEARMADERANGE, df, median)
+ggplot(median_kwh_built, aes(x = as.factor(YEARMADERANGE), y = KWH, fill = as.factor(YEARMADERANGE))) +
+  geom_bar(stat = "identity") +
+  labs(x = "Year Built", y = "Median KWH",
+       title = "Median KWH of Year Built") +
+  scale_fill_npg(name="Date Range",
+                 labels=c("Before 1950",
+                          "1950 to 1959",
+                          "1960 to 1969",
+                          "1970 to 1979",
+                          "1980 to 1989",
+                          "1990 to 1999",
+                          "2000 to 2009",
+                          "2010 to 2015",
+                          "2016 to 2020"))+
+  theme(axis.text.x = element_blank())
+```
+
+```{r room count, echo=FALSE}
+#What is the relation between total # of rooms & total KWH used in a year?
+print("New analysis here")
+```
+
+How does Appliance Usage Pattern features relates with the target variable 'KWH'?
+- Please look at DRYRUSE, DWASHUSE, AMTMICRO
+What plots are appropriate for this level of analysis?
+
+What other appliances or end-uses consume the most amount of electricity in the average US house?
+Would a barplot of the average electricity use by appliance make sense?
+
+
+```{r appliance use patterns and KWH consumption}
+# Analyzing how appliance usage relates to KWH consumption
+# Scatter plots for each appliance usage vs KWH
+ggplot(df, aes(x = DRYRUSE, y = KWH)) +
+  geom_point() +
+  geom_smooth(method = "lm", color = "blue") +
+  labs(title = "Relationship between Dryer Use and KWH",
+       x = "Dryer Use (Frequency)",
+       y = "Electricity Consumption (KWH)")
+
+ggplot(df, aes(x = DWASHUSE, y = KWH)) +
+  geom_point() +
+  geom_smooth(method = "lm", color = "red") +
+  labs(title = "Relationship between Dishwasher Use and KWH",
+       x = "Dishwasher Use (Frequency)",
+       y = "Electricity Consumption (KWH)")
+
+ggplot(df, aes(x = AMTMICRO, y = KWH)) +
+  geom_point() +
+  geom_smooth(method = "lm", color = "green") +
+  labs(title = "Relationship between Microwave Use and KWH",
+       x = "Microwave Use (Frequency)",
+       y = "Electricity Consumption (KWH)")
+
+# Calculating the average electricity consumption by each appliance
+average_consumption <- df %>%
+  summarise(
+    Avg_Dryer = mean(DRYRUSE, na.rm = TRUE),
+    Avg_Dishwasher = mean(DWASHUSE, na.rm = TRUE),
+    Avg_Microwave = mean(AMTMICRO, na.rm = TRUE)
+  )
+
+# Converting the data to long format for plotting
+average_consumption_long <- pivot_longer(average_consumption, cols = everything(), names_to = "Appliance", values_to = "AverageKWH")
+
+# Barplot of average electricity use by appliance
+ggplot(average_consumption_long, aes(x = Appliance, y = AverageKWH, fill = Appliance)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Average Electricity Consumption by Appliance",
+       x = "Appliance",
+       y = "Average Electricity Consumption (KWH)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+#Insert code here!
+print("New analysis here")
+```
+
+How does Household Demographic features relates with the target variable 'KWH'?
+- Please look at NHSLDMEM, MONEYPY, TELLDAYS, ATHOME, ELECVEH
+
+```{r demographics and KWH consumption}
+# Scatter plot for NHSLDMEM if it's continuous, otherwise consider a boxplot or other appropriate plot
+ggplot(df, aes(x = NHSLDMEM, y = KWH)) +
+  geom_point() +
+  geom_smooth(method = "lm", color = "blue") +
+  labs(title = "Relationship between Number of Household Members and KWH Consumption",
+       x = "Number of Household Members",
+       y = "Electricity Consumption (KWH)")
+
+# Use another plot for MONEYPY if it's continuous; otherwise, adapt accordingly
+ggplot(df, aes(x = MONEYPY, y = KWH)) +
+  geom_point() +
+  geom_smooth(method = "lm", color = "red") +
+  labs(title = "Relationship between Annual Income and KWH Consumption",
+       x = "Annual Income",
+       y = "Electricity Consumption (KWH)")
+
+# Continue for other variables:
+# TELLDAYS, ATHOME, and ELECVEH might be categorical. If they are, use boxplots:
+ggplot(df, aes(x = factor(TELLDAYS), y = KWH)) +
+  geom_boxplot(fill = "cyan") +
+  labs(title = "KWH Consumption by Number of Telecommunication Days",
+       x = "Number of Telecommunication Days",
+       y = "KWH Consumption")
+
+ggplot(df, aes(x = factor(ATHOME), y = KWH)) +
+  geom_boxplot(fill = "magenta") +
+  labs(title = "KWH Consumption by At Home Status",
+       x = "At Home Status",
+       y = "KWH Consumption")
+
+ggplot(df, aes(x = factor(ELECVEH), y = KWH)) +
+  geom_boxplot(fill = "green") +
+  labs(title = "KWH Consumption by Number of Electric Vehicles",
+       x = "Number of Electric Vehicles",
+       y = "KWH Consumption")
+```
+
+
+## Data Transformation & Processing
+Let's combine some variables together that make sense. Make a new variable to represent TV-Entertainment devices, total "computers", total count and indicator (dummy) variable for smart devices.
+
+```{r new variables, echo=FALSE}
+#TV Entertainment {TVEnter} = CABLESAT+COMBODVR+PLAYSTA+DVD+VCR+TVAUDIOSYS+TVCOLOR
+#Devices {DEVICES}= DESKTOP+NUMLAPTOP+NUMTABLET+ELPERIPH+NUMSMPHONE
+#Smart Devices {SMART} = SMARTSPK+SSTV+SSTEMP+SSOTHER+SSLIGHT+SSSECURE
+df <- df %>%
+  mutate(TVEnter = rowSums(select(., c("CABLESAT",
+                                       "COMBODVR",
+                                       "PLAYSTA",
+                                       "DVD","VCR",
+                                       "TVAUDIOSYS",
+                                       "TVCOLOR"))),
+         DEVICES = rowSums(select(., c("DESKTOP",
+                                       "NUMLAPTOP",
+                                       "NUMTABLET",
+                                       "ELPERIPH",
+                                       "NUMSMPHONE"))),
+         SMART = rowSums(select(., c("SMARTSPK",
+                                       "SSTV",
+                                       "SSTEMP",
+                                       "SSOTHER",
+                                       "SSLIGHT",
+                                     "SSSECURE"))))
+#make SMART a binary variable
+df$SMART = ifelse(df$SMART>0,1,0)
+print("Summary stats for TVEnter")
+describe(df$TVEnter)
+print("Summary stats for devices, like computers, tablets, and smartphones")
+describe(df$DEVICES)
+print("Summary stats for binary variable for smart (IOT) devices")
+describe(df$SMART)
+```
+It is now useful to look at a smaller dataset. We will drop variables where 95% of observations are NA (or minus 2). Let's also remove all imputed variables and NWEIGHT variables.
+
+
+```{r additive variables check, echo=TRUE}
+#Let's drop the variables from df based on 95% of -2 (NA)
+dim(df)
+df <- df[,!(names(df) %in% prop_minu2_95$V1)]
+dim(df)
+
+#remove imputation variables
+columns_to_remove <- grep("^Z", names(df), value = TRUE)
+df <- df[, !names(df) %in% columns_to_remove]
+dim(df)
+
+#remove NWEGIHT variables
+columns_to_remove2 <- grep("NWEIGHT", names(df), value = TRUE)
+df <- df[, !names(df) %in% columns_to_remove2]
+dim(df)
+```
+
+Let's now see if there are any variables that are linear combinations of other variables.
+
+```{r linear combinations check, echo=FALSE}
+
+#BTUEL = total British Thermal Units (BTUs) in electricity use
+BTUEL_columns <- grep("BTUEL", names(df), value = TRUE)
+#BTUEL_columns
+
+total_check0 = df$BTUEL - (df$BTUELSPH + df$BTUELCOL +
+                             df$BTUELWTH + df$BTUELRFG +
+                             df$BTUELFRZ + df$BTUELCOK +
+                             df$BTUELMICRO + df$BTUELCW +
+                             df$BTUELCDR + df$BTUELDWH+
+                             df$BTUELLGT + df$BTUELTVREL +
+                             df$BTUELAHUHEAT + df$BTUELAHUCOL +
+                             df$BTUELCFAN + df$BTUELDHUM +
+                             df$BTUELPLPMP + df$BTUELHTBPMP +
+                             df$BTUELHTBHEAT + df$BTUELEVCHRG +
+                             df$BTUELNEC + df$BTUELOTH)
+total_check0 = lapply(total_check0,
+                      function(x) replace(x, x < 0.1, 0))
+print("BTUEL check")
+sum(as.numeric(as.list(total_check0)))
+
+#DOLEL = total 2020USD spent on electricity use
+DOLEL_columns <- grep("DOLEL", names(df), value = TRUE)
+#DOLEL_columns #only select the major
+
+total_check1 = df$DOLLAREL - (df$DOLELSPH + df$DOLELCOL + 
+                                df$DOLELWTH + df$DOLELRFG + 
+                                df$DOLELOTH)
+total_check1 = lapply(total_check1,
+                      function(x) replace(x, x < 0.1, 0))
+print("DOLEL check")
+sum(as.numeric(as.list(total_check1)))
+
+#CUFEETNG = total natural gas (NG) use in hundred cubic feet
+CUFEETNG_columns <- grep("CUFEETNG", names(df), value = TRUE)
+CUFEETNG_columns <- paste0("df$", CUFEETNG_columns)
+#CUFEETNG_columns
+
+total_check2_a = noquote(paste0(paste(CUFEETNG_columns), collapse = " + "))
+#total_check2_a #copy over
+total_check2 = df$CUFEETNG - (df$CUFEETNGSPH + df$CUFEETNGWTH + df$CUFEETNGCOK + 
+                                df$CUFEETNGCDR + df$CUFEETNGPLHEAT +
+                                df$CUFEETNGHTBHEAT + df$CUFEETNGNEC + 
+                                df$CUFEETNGOTH)
+total_check2 = lapply(total_check2,
+                      function(x) replace(x, x < 0.1, 0))
+print("CUFEETNG check")
+sum(as.numeric(as.list(total_check2)))
+
+#BTUNG = total British Thermal Units (BTUs) in natural gas (NG) use
+BTUNG_columns <- grep("BTUNG", names(df), value = TRUE)
+BTUNG_columns <- paste0("df$", BTUNG_columns)
+#BTUNG_columns
+total_check3_a = noquote(paste0(paste(BTUNG_columns), collapse = " + "))
+#total_check3_a #copy over
+total_check3 = df$BTUNG - (df$BTUNGSPH + df$BTUNGWTH + df$BTUNGCOK + 
+                             df$BTUNGCDR + df$BTUNGPLHEAT + df$BTUNGHTBHEAT + 
+                             df$BTUNGNEC + df$BTUNGOTH)
+total_check3 = lapply(total_check3,
+                      function(x) replace(x, x < 0.1, 0))
+print("BTUNG check")
+sum(as.numeric(as.list(total_check3)))
+
+#DOLLARNG = total 2020USD spent on natural gas (NG)
+total_check4 = df$DOLLARNG - (df$DOLNGCDR + df$DOLNGCOK + 
+                                df$DOLNGHTBHEAT + df$DOLNGNEC + 
+                                df$DOLNGOTH + df$DOLNGPLHEAT +
+                                df$DOLNGSPH + df$DOLNGWTH)
+total_check4 = lapply(total_check4,
+                      function(x) replace(x, x < 0.1, 0))
+print("DOLLARNG check")
+sum(as.numeric(as.list(total_check4)))
+
+#GALLONLP = total propane use, in gallons
+GALLONLP_columns <- grep("GALLONLP", names(df), value = TRUE)
+GALLONLP_columns <- paste0("df$", GALLONLP_columns)
+#GALLONLP_columns
+total_check4_a = noquote(paste0(paste(GALLONLP_columns), collapse = " + "))
+#total_check4_a #copy over
+total_check4 = df$GALLONLP - (df$GALLONLPSPH + df$GALLONLPWTH + 
+                             df$GALLONLPCOK + df$GALLONLPCDR + 
+                             df$GALLONLPNEC + df$GALLONLPOTH)
+total_check4 = lapply(total_check4,
+                      function(x) replace(x, x < 0.1, 0))
+print("GALLONLP check")
+sum(as.numeric(as.list(total_check4)))
+
+#GALLONFO = total fuel oil/kerosene use, in gallons
+GALLONFO_columns <- grep("GALLONFO", names(df), value = TRUE)
+GALLONFO_columns <- paste0("df$", GALLONFO_columns)
+#GALLONFO_columns
+total_check5_a = noquote(paste0(paste(GALLONFO_columns), collapse = " + "))
+#total_check5_a #copy over
+total_check5 = df$GALLONFO - (df$GALLONFOSPH + df$GALLONFOWTH + 
+                                df$GALLONFONEC + df$GALLONFOOTH)
+total_check5 = lapply(total_check5,
+                      function(x) replace(x, x < 0.1, 0))
+print("GALLONFO check")
+sum(as.numeric(as.list(total_check5)))
+
+#BTULP = total British Thermal Units (BTUs) in  fuel oil/kerosene use
+BTULP_columns <- grep("BTULP", names(df), value = TRUE)
+BTULP_columns <- paste0("df$", BTULP_columns)
+#BTULP_columns
+total_check6_a = noquote(paste0(paste(BTULP_columns), collapse = " + "))
+#total_check6_a #copy over
+total_check6 = df$BTULP - (df$BTULPSPH + df$BTULPWTH + df$BTULPCOK + 
+                             df$BTULPCDR + df$BTULPNEC + df$BTULPOTH)
+total_check6 = lapply(total_check6,
+                      function(x) replace(x, x < 0.1, 0))
+print("BTULP check")
+sum(as.numeric(as.list(total_check6)))
+
+#DOLLP = total 2020USD spent on fuel oil/kerosene use
+DOLLP_columns <- grep("DOLLP", names(df), value = TRUE)
+#DOLLP_columns
+
+total_check7 = df$DOLLARLP - (df$DOLLPSPH + df$DOLLPWTH + 
+                                df$DOLLPCOK + df$DOLLPCDR + 
+                                df$DOLLPNEC + df$DOLLPOTH)
+total_check7 = lapply(total_check7,
+                      function(x) replace(x, x < 0.1, 0))
+print("DOLLP check")
+sum(as.numeric(as.list(total_check7)))
+
+#BTULP = total British Thermal Units (BTUs) in propane use
+BTULP_columns <- grep("BTULP", names(df), value = TRUE)
+BTULP_columns <- paste0("df$", BTULP_columns)
+#BTULP_columns
+total_check8_a = noquote(paste0(paste(BTULP_columns), collapse = " + "))
+#total_check8_a #copy over
+total_check8 = df$BTULP - (df$BTULPSPH + df$BTULPWTH + 
+                                df$BTULPCOK + df$BTULPCDR + df$BTULPNEC + df$BTULPOTH)
+total_check8 = lapply(total_check8,
+                      function(x) replace(x, x < 0.1, 0))
+print("BTULP check")
+sum(as.numeric(as.list(total_check8)))
+
+```
+
+We can safely assume that the following hold:
+* KWH = KWHSPH + KWHCOL + KWHWTH + KWHRFG + KWHOTH
+* BTUEL = BTUELSPH + BTUELCOL + BTUELWTH + BTUELRFG + BTUELOTH
+* DOLLAREL = DOLELSPH + DOLELCOL + DOLELWTH + DOLELRFG + DOLELOTH
+* CUFEETNG = CUFEETNGSPH + CUFEETNGWTH + CUFEETNGOTH
+* BTUNG = BTUNGSPH + BTUNGWTH + BTUNGOTH
+* DOLLARNG = DOLNGSPH + DOLNGWTH + DOLNGOTH
+* GALLONLP = GALLONLPSPH + GALLONLPWTH + GALLONLPOTH
+* BTULP = BTULPSPH + BTULPWTH + BTULPOTH
+* DOLLARLP = DOLLPSPH + DOLLPWTH + DOLLPOTH
+* GALLONFO = GALLONFOSPH + GALLONFOWTH + GALLONFOOTH
+* BTUFO = BTUFOSPH + BTUFOWTH + BTUFOOTH
+* DOLLARFO = DOLFOSPH + DOLFOWTH + DOLFOOTH
+* GALLONKER = GALLONKERSPH + GALLONKERWTH + GALLONKEROTH
+* BTUKER = BTUKERSPH + BTUKERWTH + BTUKEROTH
+* DOLLARKER = DOLKERSPH + DOLKERWTH + DOLKEROTH
+* TOTALBTU = TOTALBTUSPH + TOTALBTUCOL + TOTALBTUWTH + TOTALBTURFG + TOTALBTUOTH
+* TOTALDOL = TOTALDOLSPH + TOTALDOLCOL + TOTALDOLWTH + TOTALDOLRFG + TOTALDOLOTH
+* TOTALBTUSPH = BTUELSPH + BTUNGSPH + BTULPSPH + BTUFOSPH + BTUKERSPH
+* TOTALBTUCOL = BTUELCOL
+* TOTALBTUWTH = BTUELWTH + BTUNGWTH + BTULPWTH + + BTUFOWTH + BTUKERWTH
+* TOTALBTURFG = BTUELRFG
+* TOTALBTUOTH = BTUELOTH + BTUNGOTH + BTULPOTH + BTUFOOTH + BTUKEROTH
+* TOTALDOLSPH = DOLELSPH + DOLNGSPH + DOLLPSPH + DOLFOSPH + DOLKERSPH
+* TOTALDOLCOL = DOLELCOL
+* TOTALDOLWTH = DOLELWTH + DOLNGWTH + DOLLPWTH + DOLFOWTH + DOLKERWTH
+* TOTALDOLRFG = DOLELRFG
+* TOTALDOLOTH = DOLELOTH + DOLNGOTH + DOLLPOTH + DOLFOOTH + DOLKEROTH
+
+
+```{r reduce variables, echo=TRUE}
+#Remove these unnecessary individual items (keep only main)
+columns_to_remove_linear <- grep("KWH", names(df), value = TRUE)
+#columns_to_remove_linear
+KWHcolumns <- columns_to_remove_linear[3:length(columns_to_remove_linear)-1]
+#KWHcolumns
+dim(df)
+df <- df[, !names(df) %in% KWHcolumns]
+dim(df)
+
+BTUcolumns_to_remove_linear <- grep("BTU", names(df), value = TRUE)
+#BTUcolumns_to_remove_linear
+dim(df)
+df <- df[, !names(df) %in% BTUcolumns_to_remove_linear]
+dim(df)
+
+DOLcolumns_to_remove_linear <- grep("DOL", names(df), value = TRUE)
+#DOLcolumns_to_remove_linear
+dim(df)
+df <- df[, !names(df) %in% DOLcolumns_to_remove_linear]
+dim(df)
+
+ZAcolumns_to_remove <- grep("ZA", names(df), value = TRUE)
+ZAcolumns_to_remove
+dim(df)
+df <- df[, !names(df) %in% ZAcolumns_to_remove]
+dim(df)
+
+GALLONcolumns_to_remove <- grep("GALLON", names(df), value = TRUE)
+GALLONcolumns_to_remove
+dim(df)
+df <- df[, !names(df) %in% GALLONcolumns_to_remove]
+dim(df)
+
+
+#remove outlier observations from KWH analysis
+print("Annual electricity use at 99.9% percentile:")
+quantile(df$KWH, probs = 0.999)
+print("Number of outliers:")
+as.numeric(dim(df[df$KWH> quantile(df$KWH, probs = 0.999),])[1])
+
+df_no_outlier = df[df$KWH<=quantile(df$KWH, probs = 0.999),]
+
+ggplot(df_no_outlier, aes(x = KWH)) +
+  geom_boxplot(fill="skyblue")+
+  labs(title = "KWH Boxplot",
+       x = "KWH")+
+  scale_x_continuous(breaks=seq(0,180000,5000))+
+  scale_y_continuous(labels = NULL)
+```
+
+# Feature Engineering
+## Exploratory Feature Reduction
+
+Let's use Principle Component Analysis (PCA), a feature reduction technique to see how many features can be used for data modeling. In other words, PCA is a technique to obtain important features from a large set of features which explains the most of the variability in the data. Let's start implementing PCA by first removing response variable from the dataset.
+
+
+```{r PCA, echo=TRUE}
+
+#df$logKWH
+df_tmp = subset(df_no_outlier, select = -c(KWH,logKWH))
+
+cat("Dimensions of dataframe with no outliers and no KWH/logKWH features:",
+    dim(df_tmp))
+dim(df_tmp)
+
+#Let's use One-hot Encoding, a feature encoding strategy, first to convert our
+#categorical features into a numerical feature
+
+#one-hot encoding
+#convert categorical variables to numerical
+df_tmp = model.matrix(~., df_tmp)
+
+#Remove the intercept column added by model.matrix
+df_tmp <- df_tmp[, -1]
+
+#Remove columns with constant variance
+df_tmp_reduced <- df_tmp[, apply(df_tmp, 2, function(x) length(unique(x)) > 1)]
+dim(df_tmp_reduced)
+
+# Apply PCA
+pca_result <- prcomp(df_tmp_reduced, scale. = TRUE)
+
+#Scree plot
+#Install and load the factoextra package if not already installed
+#install.packages("factoextra")
+library(factoextra)
+
+# Plot scree plot
+fviz_eig(pca_result, addlabels = TRUE,
+         ncp = 20,
+         ylim = c(0, 10))
+# 7 features will capture most of variance
+
+# Calculate cumulative proportion of variance explained
+cumulative_var <- cumsum(pca_result$sdev^2 / sum(pca_result$sdev^2))
+
+cum_var_pct = round(cumulative_var * 100, 2)
+cat("Cumulative proportion of variance explained: ",
+    cum_var_pct)
+
+cat("First variable explains ",
+      cum_var_pct[1], "% of the variance.")
+cat("First & second variable explains ",
+    cum_var_pct[2], "% of the variance.")
+cat("First seven variables explain ",
+    cum_var_pct[7], "% of the variance.")
+
+#find index of item at 95% variance
+index <- which(cum_var_pct > 95)
+cat("The ", paste0(index[1], "th cumulative variable explains 95% of the variance."),
+    sep = "")
+
+# Plot cumulative scree plot
+plot(1:length(pca_result$sdev), cumulative_var, type = "b", 
+     xlab = "Principal Component", ylab = "Cumulative Proportion of Variance Explained",
+     main = "Cumulative Scree Plot")
+
+
+#let's find variables/features with single unique values
+# Find features with single unique value
+single_unique_features <- names(df_tmp_reduced)[sapply(df_tmp_reduced, 
+                                                       function(x) length(unique(x))) == 1]
+# Print the names of features with single unique value
+cat("Number of features with single unique values", 
+    single_unique_features)
+
+library(corrplot)
+# Plot the correlation matrix corrplot
+numeric <- sapply(df, is.numeric)
+filtered_df <- df[,numeric]
+correlations <- as.data.frame(cor(filtered_df))
+dim(correlations)
+
+#best 30
+best_predictors <- order(correlations$KWH, decreasing = TRUE)[3:32]
+#we ignore top 2, KWH & logKWH
+
+#keep top 30
+top30_features <- correlations[,best_predictors]
+#print(names(top30_features))
+print(top30_features)
+filtered_df_top30 <- filtered_df[, colnames(filtered_df) %in% names(top30_features)]
+filtered_df_top30$KWH = filtered_df$KWH
+
+library(corrplot)
+# Plot the correlation matrix corrplot
+filtered_df_top30 <- filtered_df_top30[, c("KWH", setdiff(names(filtered_df_top30), "KWH"))]
+correlations <- cor(filtered_df_top30)
+corrplot(correlations, method = 'square',
+         type = 'lower',diag = FALSE) # colorful number
+
+#these correlations plots show which features are highly correlated with KWH
+
+```
+
+
+## Find features with Gradient Boosted Machines (GBM)
+This is a decision tree-based approach. We use cross validation (CV) process in model training. If we were to fit the model with the training set while evaluated with the test set, we obtained only a single sample point of evaluation with one test set. How can we be sure it is an accurate evaluation, rather than a value too low or too high by chance? If we have two models, and found that one model is better than another based on the evaluation, how can we know this is also not by chance? This is the premise behind CV. CV uses k folds to resample the same dataset multiple times and pretend they are different. With CV, as we are evaluating the model, or hyperparameter, the model has to be trained from scratch, each time, without reusing the training result from previous attempts.
+
+We score the different models (or hyperparameters) by selecting the Root Mean Square Error (RMSE). This is the square root of the mean of the squared difference between predicted and actual values. This yields an absolute metric in the same unit as the label (in this case, Electricity Consumption in KWH). The smaller the value, the better the model is (i.e. in a simplistic sense, it represents the average electricity consumption by which the predictions are wrong!)
+
+```{r intro to GBM, echo=TRUE}
+# install.packages("gbm")
+library(gbm)
+
+#for reproducibility
+set.seed(123)
+
+library(rsample)
+filtered_df_top30_split <- initial_split(filtered_df_top30, prop = .7)
+filtered_df_top30_train <- training(filtered_df_top30_split)
+filtered_df_top30_test  <- testing(filtered_df_top30_split)
+
+# train GBM model
+gbm.fit <- gbm(
+  formula = KWH ~ .,
+  distribution = "gaussian",
+  data = filtered_df_top30_train,
+  n.trees = 10000,
+  interaction.depth = 1,
+  shrinkage = 0.001,
+  cv.folds = 5,
+  n.cores = NULL, # will use all cores by default
+  verbose = FALSE
+)  
+
+# print results
+print(gbm.fit)
+
+# get MSE and compute RMSE
+sqrt(min(gbm.fit$cv.error))
+
+cat("The minimum CV RMSE is",
+    sqrt(min(gbm.fit$cv.error)),
+    "kWH off from the actual annual kWh consumption")
+
+# plot loss function as a result of n trees added to the ensemble
+gbm.perf(gbm.fit, method = "cv")
+#The plot shows the CV error is still decreasing at 10,000 trees
+#(and we've only used a few variables).
+
+```
+
+Instead of manually tweaking hyperparameters one at a time, we can perform a grid search that iterates over every combination of hyperparameter values and allows us to assess which combination tends to perform well. To perform a manual grid search, first we want to construct our grid of hyperparameter combinations. We’re going to search across 81 models with varying learning rates and tree depth. I also vary the minimum number of observations allowed in the trees terminal nodes (n.minobsinnode) and introduce stochastic gradient descent by allowing bag.fraction < 1.
+
+The following code will loop through each hyperparameter combination and apply 5,000 trees. However, to speed up the tuning process, instead of performing 5-fold CV I train on 75% of the training observations and evaluate performance on the remaining 25%. Important note: when using train.fraction it will take the first XX% of the data so its important to randomize your rows in case their is any logic behind the ordering of the data (i.e. ordered by neighborhood).
+
+After about 50 minutes of training time (on my desktop) our grid search ends and we see a few important results pop out. First, our top model has better performance than our previously fitted model above, with the RMSE at 5395.964 kWh (vs 5559.019 kWH above, about 2.9% lower). Second, looking at the top 10 models we see that:
+* none of the top models used a learning rate of 0.3
+  ** smaller incremental steps down the gradient descent appears to work best
+* none of the top models used stumps (interaction.depth = 1)
+  ** there are likely some important interactions that the deeper trees are able to capture
+* adding a stochastic component with bag.fraction < 1 seems to help
+  ** there may be some local minimas in our loss function gradient
+* none of the top models used n.minobsinnode = 15
+  ** the smaller nodes may allow us to capture hypothetical pockets of unique feature-price point instances
+
+```{r tuning GBM, echo=TRUE}
+
+# create hyperparameter grid
+hyper_grid <- expand.grid(
+  shrinkage = c(.01, .1, .3),
+  interaction.depth = c(1, 3, 5),
+  n.minobsinnode = c(5, 10, 15),
+  bag.fraction = c(.65, .8, 1), 
+  optimal_trees = 0,               # a place to dump results
+  min_RMSE = 0                     # a place to dump results
+)
+
+# total number of combinations
+nrow(hyper_grid)
+## [1] 81
+
+# randomize data
+random_index <- sample(1:nrow(filtered_df_top30_train), nrow(filtered_df_top30_train))
+random_filtered_df_top30_train <- filtered_df_top30_train[random_index, ]
+
+# grid search 
+for(i in 1:nrow(hyper_grid)) {
+  
+  # reproducibility
+  set.seed(123)
+  
+  # train model
+  gbm.tune <- gbm(
+    formula = KWH ~ .,
+    distribution = "gaussian",
+    data = random_filtered_df_top30_train,
+    #number of iterations = n.trees
+    n.trees = 50,
+    #depth of each tree = interaction.depth
+    interaction.depth = hyper_grid$interaction.depth[i],
+    #learning rate = shrinkage
+    shrinkage = hyper_grid$shrinkage[i],
+    #smallest node is i observations at terminal node
+    n.minobsinnode = hyper_grid$n.minobsinnode[i],
+    #subsampling rate = bag.fraction
+    bag.fraction = hyper_grid$bag.fraction[i],
+    train.fraction = .75,
+    n.cores = NULL, # will use all cores by default
+    verbose = FALSE
+  )
+  
+  # add min training error and trees to grid
+  hyper_grid$optimal_trees[i] <- which.min(gbm.tune$valid.error)
+  hyper_grid$min_RMSE[i] <- sqrt(min(gbm.tune$valid.error))
+}
+
+hyper_grid %>% 
+  dplyr::arrange(min_RMSE) %>%
+  head(10)
+```
+
+
+Now that we have found the "looks good enough for me" model :), let's estimate our model using that specific hyperparameter setting.
+
+```{r final trained GBM, echo=FALSE}
+# for reproducibility
+set.seed(123)
+
+# train GBM model
+gbm.fit.final <- gbm(
+  formula = KWH ~ .,
+  distribution = "gaussian",
+  data = random_filtered_df_top30_train,
+  n.trees = 2112,
+  interaction.depth = 3,
+  shrinkage = 0.1,
+  n.minobsinnode = 15,
+  bag.fraction = 0.65, 
+  train.fraction = 1,
+  n.cores = NULL, # will use all cores by default
+  verbose = FALSE
+  )
+
+cat("RMSE training error is",
+    sqrt(min(gbm.fit.final$train.error)), "kWh")
+
+#install.packages("vip")
+library(vip)
+vip::vip(gbm.fit.final)
+
+par(mar = c(5, 7, 1, 1))
+summary(
+  gbm.fit.final, 
+  cBars = 10,
+  method = relative.influence, # also can use permutation.test.gbm
+  las = 2
+)
+```
+
+After the most relevant variables have been identified, the next step is to attempt to understand how the response variable changes based on these variables. For this we can use partial dependence plots (PDPs) and individual conditional expectation (ICE) curves.
+
+PDPs plot the change in the average predicted value as specified feature(s) vary over their marginal distribution. For example, consider the TOTCSQFT variable (total square foot of living space cooled by air conditioning). The PDP plot below displays the average change in predicted annual electricity consumption as we vary TOTCSQFT while holding all other variables constant. This is done by holding all variables constant for each observation in our training data set but then apply the unique values of TOTCSQFT for each observation. We then average the annual electricity consumption (KWH variable) across all the observations. This PDP illustrates how the predicted KWH variable generally increases as the square footage of the cooled space in a house increases. However, the larger the home is, the greater the variability due to energy efficiency or temperate climate effects.
+
+```{r partial dependence plots, echo=FALSE}
+library(ggplotify)
+plot(gbm.fit.final, rug = TRUE, i.var = 27, train = random_filtered_df_top30_train)
+plot(gbm.fit.final, rug = TRUE, i.var = 23, train = random_filtered_df_top30_train)
+plot(gbm.fit.final, rug = TRUE, i.var = 7, train = random_filtered_df_top30_train)
+plot(gbm.fit.final, rug = TRUE, i.var = 14, train = random_filtered_df_top30_train)
+
+```
+
+## Predicting using GBM
+Once you have decided on a final model you will likely want to use the model to predict on new observations. Like most models, we simply use the predict function; however, we also need to supply the number of trees to use (see ?predict.gbm for details).
+
+```{r predictions, echo=FALSE}
+# predict values for test data
+pred <- predict(gbm.fit.final, n.trees = gbm.fit.final$n.trees, random_filtered_df_top30_train)
+
+# results
+#install.packages("caret")
+library(caret)
+caret::RMSE(pred, filtered_df_top30_test$KWH)
+
+```
+
+# XGBoost 
+The xgboost or “Extreme Gradient Boosting” method is a more efficient implementation of gradient boosting framework (apprx 10x faster than gbm). XGBoost has been quite popular in data mining competitions.
+
+XGBoost only works with matrices that contain all numeric variables; consequently, we need to one hot encode our data. There are different ways to do this in R (i.e. Matrix::sparse.model.matrix, caret::dummyVars) but here we will use the vtreat package. vtreat is a robust package for data prep and helps to eliminate problems caused by missing values, novel categorical levels that appear in future data sets that were not in the training data, etc. However, vtreat is not very intuitive.
+
+```{r vtreat, echo=TRUE}
+# variable names
+features <- setdiff(names(filtered_df_top30_train), "KWH")
+
+# Create the treatment plan from the training data
+treatplan <- vtreat::designTreatmentsZ(filtered_df_top30_train, features, verbose = FALSE)
+
+# Get the "clean" variable names from the scoreFrame
+new_vars <- treatplan %>%
+  magrittr::use_series(scoreFrame) %>%        
+  dplyr::filter(code %in% c("clean", "lev")) %>% 
+  magrittr::use_series(varName)     
+
+# Prepare the training data
+features_train <- vtreat::prepare(treatplan, filtered_df_top30_train, 
+                                  varRestriction = new_vars) %>% as.matrix()
+response_train <- filtered_df_top30_train$KWH
+
+# Prepare the test data
+features_test <- vtreat::prepare(treatplan, filtered_df_top30_test,
+                                 varRestriction = new_vars) %>% as.matrix()
+response_test <- filtered_df_top30_test$KWH
+
+# dimensions of one-hot encoded data
+dim(features_train)
+dim(features_test)
+
+```
+XGBoost provides different training functions (i.e., xgb.train) which is just a wrapper for xgboost. However, to trainan XGBoost we typically want to use xgb.cv, which incorporates cross-validation. The following trains a basic 5-fold cross validated XGBoost model with 1,000 trees. There are many parameters available in xgb.cv but the ones you have become more familiar with in this tutorial include the following default values:
+* learning rate (eta): 0.3 (correct it to 0.1)
+* tree depth (max_depth): 6
+* minimum node size (min_child_weight): 1
+* percent of training data to sample for each tree (subsample is equivalent to gbm's bag.fraction): 100%
+
+```{r xgboost training fit, echo=FALSE}
+# reproducibility
+set.seed(123)
+library(xgboost)
+xgb.fit1 <- xgb.cv(
+  data = features_train,
+  label = response_train,
+  nrounds = 1000,
+  eta = 0.1,
+  nfold = 5,
+  objective = "reg:squarederror",  # for regression models
+  verbose = 0               # silent,
+)
+```
+
+The xgb.fit1 object contains lots of good information. In particular we can assess the xgb.fit1's evaluation_log to identify the minimum RMSE and the optimal number of trees for both the training data and the cross-validated error. We can see that the training error continues to decrease to 1,000 trees where the RMSE is still above 1500; however, the cross validated error reaches a minimum RMSE of 5,538 with only 48 trees (and then increases)!
+
+
+```{r xgboost training fit stats, echo=FALSE}
+# get number of trees that minimize error
+xgb.fit1$evaluation_log %>%
+  dplyr::summarise(
+    ntrees.train = which(train_rmse_mean == min(train_rmse_mean))[1],
+    rmse.train   = min(train_rmse_mean),
+    ntrees.test  = which(test_rmse_mean == min(test_rmse_mean))[1],
+    rmse.test   = min(test_rmse_mean),
+  )
+##   ntrees.train rmse.train ntrees.test rmse.test
+## 1        1000  1750.591            48 5538.26
+
+# plot error vs number trees
+ggplot(xgb.fit1$evaluation_log) +
+  geom_line(aes(iter, train_rmse_mean), color = "red") +
+  geom_line(aes(iter, test_rmse_mean), color = "blue")
+```
+
+A nice feature provided by xgb.cv is early stopping. This allows us to tell the function to stop running if the cross validated error does not improve for n continuous trees. For example, the above model could be re-run with the following where we tell it stop if we see no improvement for 10 consecutive trees. This feature will help us speed up the tuning process in the next section.
+
+``` {r xgboost early stop, echo=FALSE}
+# reproducibility
+set.seed(123)
+
+xgb.fit2 <- xgb.cv(
+  data = features_train,
+  label = response_train,
+  nrounds = 1000,
+  nfold = 5,
+  objective = "reg:squarederror",  # for regression models
+  verbose = 0,               # silent,
+  early_stopping_rounds = 10 # stop if no improvement for 10 consecutive trees
+)
+
+# plot error vs number trees
+ggplot(xgb.fit2$evaluation_log) +
+  geom_line(aes(iter, train_rmse_mean), color = "red") +
+  geom_line(aes(iter, test_rmse_mean), color = "blue")
+```
+
+## Tuning in XGBoost 
+We clearly need to tune our XGBoost model. To do this, we pass paramters as a list objecto the params argument. The most common parameters include:
+* eta: learning rate
+* max_depth: tree depth
+* min_child_weight: min # of observations required in each terminal node
+* subsample: percent of training data to sample for each tree
+* colsample_bytree: percent of columns to sample from for each tree
+
+For example, if we wanted to specify specific values for these parameters we would extend the above model with the following parameters.
+
+``` {r xgboost tuning params, echo=FALSE}
+# create parameter list
+  params <- list(
+    eta = .1,
+    max_depth = 5,
+    min_child_weight = 2,
+    subsample = .8,
+    colsample_bytree = .9
+  )
+
+# reproducibility
+set.seed(123)
+
+# train model
+xgb.fit3 <- xgb.cv(
+  params = params,
+  data = features_train,
+  label = response_train,
+  nrounds = 1000,
+  nfold = 5,
+  objective = "reg:squarederror",  # for regression models
+  verbose = 0,               # silent,
+  early_stopping_rounds = 10 # stop if no improvement for 10 consecutive trees
+)
+
+# assess results
+xgb.fit3$evaluation_log %>%
+  dplyr::summarise(
+    ntrees.train = which(train_rmse_mean == min(train_rmse_mean))[1],
+    rmse.train   = min(train_rmse_mean),
+    ntrees.test  = which(test_rmse_mean == min(test_rmse_mean))[1],
+    rmse.test   = min(test_rmse_mean),
+  )
+##   ntrees.train rmse.train ntrees.test rmse.test
+## 1          57   4857.73          47   5532.104
+```
+
+Or we can do a large search grid, like we did with gbm. We create our hyperparameter search grid along with columns to dump our results in. Here, I create a pretty large search grid consisting of 324 different hyperparameter combinations to model. In contrast to gbm with 81 combinations taking 50 minutes, XGBoost with 324 combinations took 45 minutes to run.
+
+``` {r xgboost tuning grid search, echo=FALSE}
+# create hyperparameter grid
+hyper_grid <- expand.grid(
+  eta = c(.01, .05, .1),
+  max_depth = c(3, 5, 7),
+  min_child_weight = c(1, 3, 5, 7),
+  subsample = c(.65, .8, 1), 
+  colsample_bytree = c(.8, .9, 1),
+  optimal_trees = 0,               # a place to dump results
+  min_RMSE = 0                     # a place to dump results
+)
+
+nrow(hyper_grid)
+
+# grid search 
+for(i in 1:nrow(hyper_grid)) {
+  
+  # create parameter list
+  params <- list(
+    eta = hyper_grid$eta[i],
+    max_depth = hyper_grid$max_depth[i],
+    min_child_weight = hyper_grid$min_child_weight[i],
+    subsample = hyper_grid$subsample[i],
+    colsample_bytree = hyper_grid$colsample_bytree[i]
+  )
+  
+  # reproducibility
+  set.seed(123)
+  
+  # train model
+  xgb.tune <- xgb.cv(
+    params = params,
+    data = features_train,
+    label = response_train,
+    nrounds = 500,
+    nfold = 5,
+    objective = "reg:squarederror",  # for regression models
+    verbose = 0,               # silent,
+    early_stopping_rounds = 10 # stop if no improvement for 10 consecutive trees
+  )
+  
+  # add min training error and trees to grid
+  hyper_grid$optimal_trees[i] <- which.min(xgb.tune$evaluation_log$test_rmse_mean)
+  hyper_grid$min_RMSE[i] <- min(xgb.tune$evaluation_log$test_rmse_mean)
+}
+
+hyper_grid %>%
+  dplyr::arrange(min_RMSE) %>%
+  head(10)
+```
+
+After searching through these combinations we find the best one yet. Let's assume this is the optimal model. Go ahead and fit this as our final model.
+
+```{r xgb trained final model, echo=TRUE}
+# parameter list
+params <- list(
+  eta = 0.01,
+  max_depth = 7,
+  min_child_weight = 7,
+  subsample = 0.65,
+  colsample_bytree = 0.9
+)
+
+# train final model
+xgb.fit.final <- xgboost(
+  params = params,
+  data = features_train,
+  label = response_train,
+  nrounds = 408,
+  objective = "reg:linear",
+  verbose = 0
+)
+```
+
+### Variable importance
+XGBoost provides built-in variable importance plotting. First, you need to create the importance matrix with xgb.importance and then feed this matrix into xgb.plot.importance. There are 3 variable importance measure:
+* Gain: the relative contribution of the corresponding feature to the model calculated by taking each feature’s contribution for each tree in the model. This is synonymous with gbm’s relative.influence.
+* Cover: the relative number of observations related to this feature. For example, if you have 100 observations, 4 features and 3 trees, and suppose feature1 is used to decide the leaf node for 10, 5, and 2 observations in tree1, tree2 and tree3 respectively; then the metric will count cover for this feature as 10+5+2 = 17 observations. This will be calculated for all the 4 features and the cover will be 17 expressed as a percentage for all features’ cover metrics.
+* Frequency: the percentage representing the relative number of times a particular feature occurs in the trees of the model. In the above example, if feature1 occurred in 2 splits, 1 split and 3 splits in each of tree1, tree2 and tree3; then the weightage for feature1 will be 2+1+3 = 6. The frequency for feature1 is calculated as its percentage weight over weights of all features.
+
+```{r xgb variable importance, echo=FALSE}
+# create importance matrix
+importance_matrix <- xgb.importance(model = xgb.fit.final)
+
+# variable importance plot
+xgb.plot.importance(importance_matrix, top_n = 10, measure = "Gain")
+```
+
+```{r xgb partial dependence plots, echo=FALSE}
+library(pdp)
+library(dplyr)  # Load dplyr for data manipulation
+
+# Convert matrix to a data frame if it's not already
+if (is.matrix(features_train)) {
+  features_train <- as.data.frame(features_train)
+}
+
+# Sample a subset of the data, say 10% of the rows
+sample_size <- nrow(features_train) * 0.1  # Adjust the percentage as needed
+sampled_features_train <- sample_n(features_train, size = sample_size)
+
+# Extract the feature names
+feature_names <- colnames(sampled_features_train)
+
+# Generate partial dependence plots for selected features
+partial_plots <- partial(xgb.fit.final, pred.var = c(27, 23, 7, 14), train = sampled_features_train, 
+                         grid.resolution = 20, progress = FALSE)
+par(mar = c(5, 5, 1, 1))
+# Plot the partial dependence plots
+plot(partial_plots)
+```
+
+```{r xgb predictions, echo=FALSE}
+# predict values for test data
+pred <- predict(xgb.fit.final, features_test)
+# results
+#install.packages("caret")
+library(caret)
+caret::RMSE(pred, response_test)
+
+```
+
+
+# Resources
+https://uc-r.github.io/gbm_regression
